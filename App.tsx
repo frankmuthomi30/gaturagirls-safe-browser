@@ -3,6 +3,8 @@ import React, { useState, useRef, useEffect } from 'react';
 import BrowserView from './components/BrowserView';
 import ParentDashboard from './components/ParentDashboard';
 import { Activity, ViewMode, AlertSettings, RiskLevel, AlertLog, AppTheme } from './types';
+import { db, logActivity, logAlert } from './services/firebase';
+import { ref, onValue, query, limitToLast } from 'firebase/database';
 
 const App: React.FC = () => {
   const [viewMode, setViewMode] = useState<ViewMode>('browser');
@@ -36,6 +38,30 @@ const App: React.FC = () => {
   useEffect(() => {
     document.body.className = `theme-${alertSettings.theme} text-slate-900 transition-colors duration-500`;
   }, [alertSettings.theme]);
+
+  // Firebase Listeners
+  useEffect(() => {
+    const activitiesQuery = query(ref(db, 'gatura/activities'), limitToLast(50));
+    const unsubscribeActivities = onValue(activitiesQuery, (snapshot) => {
+      const data = snapshot.val();
+      if (data) {
+        setActivities(Object.values(data));
+      }
+    });
+
+    const alertsQuery = query(ref(db, 'gatura/alerts'), limitToLast(50));
+    const unsubscribeAlerts = onValue(alertsQuery, (snapshot) => {
+      const data = snapshot.val();
+      if (data) {
+        setAlertLogs(Object.values(data));
+      }
+    });
+
+    return () => {
+      unsubscribeActivities();
+      unsubscribeAlerts();
+    };
+  }, []);
 
   // Splash Screen Lifecycle
   useEffect(() => {
@@ -96,36 +122,43 @@ const App: React.FC = () => {
   };
 
   const handleNewActivity = (activity: Activity) => {
-    setActivities(prev => [...prev, activity]);
+    // Log to Firebase instead of local state directly (the listener will update the UI)
+    logActivity(activity);
+
     const riskMap = { [RiskLevel.LOW]: 0, [RiskLevel.MEDIUM]: 1, [RiskLevel.HIGH]: 2 };
     const threshold = riskMap[alertSettings.minRiskLevel];
     const currentRisk = riskMap[activity.riskLevel];
 
     if (currentRisk >= threshold) {
       playAlertSound(activity.riskLevel);
-      const newLogs: AlertLog[] = [];
-      newLogs.push({
+      
+      const internalAlert: AlertLog = {
         id: Math.random().toString(36).substr(2, 9),
         timestamp: Date.now(),
         message: `Gatura Internal Alert: ${activity.riskLevel} risk detected.`,
         method: 'APP',
         riskLevel: activity.riskLevel
-      });
+      };
+      
+      // Log alert to Firebase
+      logAlert(internalAlert);
 
       if (alertSettings.smsEnabled) {
         const msg = `Gatura intercepted ${activity.riskLevel} threat: "${activity.content}". Dispatching alert to ${alertSettings.phoneNumber}.`;
-        newLogs.push({
+        
+        const smsAlert: AlertLog = {
           id: Math.random().toString(36).substr(2, 9),
           timestamp: Date.now(),
           message: msg,
           method: 'SMS',
           riskLevel: activity.riskLevel
-        });
+        };
+        logAlert(smsAlert);
         
         // Removed visual notification from user side as per request.
         // Alerts are now silently processed and logged for the parent view only.
       }
-      setAlertLogs(prev => [...prev, ...newLogs]);
+      // setAlertLogs is handled by the useEffect listener now
     }
   };
 
@@ -137,7 +170,7 @@ const App: React.FC = () => {
       method: 'SMS',
       riskLevel: RiskLevel.HIGH
     };
-    setAlertLogs(prev => [...prev, testLog]);
+    logAlert(testLog);
     playAlertSound(RiskLevel.HIGH);
     // This is explicitly triggered in the Admin section, so showing feedback here is appropriate.
     showNotification(`Test SMS Sent to ${alertSettings.phoneNumber}`, 'info');
